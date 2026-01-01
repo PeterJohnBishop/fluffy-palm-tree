@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fluffy-palm-tree/encryption"
 	"fmt"
 	"math/rand/v2"
 	"strings"
@@ -29,7 +30,7 @@ type ErrMsg struct {
 
 type ChatMsg struct {
 	Type      string `json:"type"`
-	Content   string `json:"content"`
+	Content   []byte `json:"content"`
 	UserID    string `json:"user_id"`
 	Timestamp int64  `json:"timestamp"`
 }
@@ -55,14 +56,21 @@ type AckEvent struct {
 const gap = "\n\n"
 
 type ChatModel struct {
-	client      *SocketClient
-	user        User
-	viewport    viewport.Model
-	messages    []string
-	textarea    textarea.Model
-	senderStyle lipgloss.Style
-	err         error
+	client        *SocketClient
+	user          User
+	viewport      viewport.Model
+	messages      []ChatMsg
+	showDecrypted bool
+	textarea      textarea.Model
+	senderStyle   lipgloss.Style
+	err           error
 }
+
+var (
+	systemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+	secureStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+	lockedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+)
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -171,7 +179,7 @@ func InitialChatModel(c *SocketClient) ChatModel {
 		client:      c,
 		user:        u,
 		textarea:    ta,
-		messages:    []string{},
+		messages:    []ChatMsg{},
 		viewport:    vp,
 		senderStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("5")),
 		err:         nil,
@@ -179,14 +187,16 @@ func InitialChatModel(c *SocketClient) ChatModel {
 }
 
 func (m ChatModel) Init() tea.Cmd {
-	userEvent := UserMsg{
-		Type:   "USER",
-		Status: "connected",
-		UserID: m.user.UID,
-	}
-	payload, _ := json.Marshal(userEvent)
-	m.client.SendChan <- payload
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, func() tea.Msg {
+		userEvent := UserMsg{
+			Type:   "USER",
+			Status: "connected",
+			UserID: m.user.UID,
+		}
+		payload, _ := json.Marshal(userEvent)
+		m.client.SendChan <- payload
+		return nil
+	})
 }
 
 // change the state
@@ -201,19 +211,18 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		headerHeight := 1 // Room for a header or title
-		footerHeight := m.textarea.Height() + lipgloss.Height(gap)
-
+		headerHeight := 1
+		footerHeight := m.textarea.Height() + lipgloss.Height(gap) + 1
 		m.viewport.Width = msg.Width
 		m.viewport.Height = msg.Height - headerHeight - footerHeight
-
-		// Update the content wrapping to the new width
-		m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
-
-		// Always keep the view at the bottom when resizing
+		m.refreshViewport()
 		m.viewport.GotoBottom()
 	case tea.KeyMsg:
 		switch msg.Type {
+		case tea.KeyCtrlX:
+			m.showDecrypted = !m.showDecrypted
+			m.refreshViewport()
+			return m, nil
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyEnter:
@@ -221,10 +230,16 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(input) == "" {
 				return m, nil
 			}
+			inputBytes, _ := json.Marshal(input)
+			encryptedInput, err := encryption.EncryptData(inputBytes, encryption.MasterKey)
+			if err != nil {
+				m.err = err
+				return m, nil
+			}
 
 			event := ChatMsg{
 				Type:      "MSG",
-				Content:   input,
+				Content:   encryptedInput,
 				UserID:    m.user.UID,
 				Timestamp: time.Now().Unix(),
 			}
@@ -239,23 +254,20 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case ChatMsg:
-		var label string
-		if msg.UserID == m.user.UID {
-			label = m.senderStyle.Render("You: ")
-		} else {
-			label = fmt.Sprintf("%s: ", msg.UserID)
-		}
-
-		m.messages = append(m.messages, label+msg.Content)
-		m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
+		m.messages = append(m.messages, msg)
+		m.refreshViewport()
 		m.viewport.GotoBottom()
 
 	case UserMsg:
-		systemStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-		m.messages = append(m.messages, systemStyle.Render(fmt.Sprintf("** User %s %s **", msg.UserID, msg.Status)))
-		m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
-		m.viewport.GotoBottom()
+		sysMsg := ChatMsg{
+			Type:    "USER",
+			UserID:  msg.UserID,
+			Content: []byte(fmt.Sprintf("User %s has %s", msg.UserID, msg.Status)),
+		}
 
+		m.messages = append(m.messages, sysMsg)
+		m.refreshViewport()
+		m.viewport.GotoBottom()
 	case ErrMsg:
 		m.err = msg.Err
 		return m, nil
@@ -264,12 +276,77 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
+func (m ChatModel) renderMessage(msg ChatMsg) string {
+	if msg.Type == "USER" {
+		return systemStyle.Render(string(msg.Content))
+	}
+
+	var label string
+	if msg.UserID == m.user.UID {
+		label = m.senderStyle.Render("You: ")
+	} else {
+		label = fmt.Sprintf("%s: ", msg.UserID)
+	}
+
+	var text string
+	if !m.showDecrypted {
+		text = lipgloss.NewStyle().Foreground(lipgloss.Color("242")).
+			Render(fmt.Sprintf("[%x...]", msg.Content[:min(10, len(msg.Content))]))
+	} else {
+		decryptedBytes, err := encryption.DecryptData(msg.Content, encryption.MasterKey)
+		if err != nil {
+			text = "[Decryption Error]"
+		} else {
+			var originalText string
+			json.Unmarshal(decryptedBytes, &originalText)
+			text = originalText
+		}
+	}
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, label, text)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (m *ChatModel) refreshViewport() {
+	var rendered []string
+
+	wrapWidth := m.viewport.Width - 2
+	if wrapWidth < 1 {
+		wrapWidth = 1
+	}
+
+	for _, msg := range m.messages {
+		line := m.renderMessage(msg)
+
+		wrappedLine := lipgloss.NewStyle().
+			Width(wrapWidth).
+			Render(line)
+
+		rendered = append(rendered, wrappedLine)
+	}
+
+	m.viewport.SetContent(strings.Join(rendered, "\n"))
+}
+
 // display the result
 func (m ChatModel) View() string {
+	status := secureStyle.Render("● ENCRYPTED")
+	if m.showDecrypted {
+		status = lockedStyle.Render("○ UNLOCKED (Ctrl+X)")
+	}
+
 	return fmt.Sprintf(
-		"%s%s%s",
+		"%s\n%s\n%s%s%s",
 		m.viewport.View(),
+		status,
 		gap,
 		m.textarea.View(),
+		"\n (Ctrl+C to quit | Ctrl+X to toggle)",
 	)
 }

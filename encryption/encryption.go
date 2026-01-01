@@ -46,6 +46,7 @@ func InitEnv() {
 }
 
 // creates a 160-bit (20 byte) Base32 secret
+// *for totp
 func GenerateRandomSecret() (string, error) {
 	secret := make([]byte, 20)
 	if _, err := io.ReadFull(rand.Reader, secret); err != nil {

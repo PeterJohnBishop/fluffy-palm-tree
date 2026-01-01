@@ -66,10 +66,11 @@ type ChatModel struct {
 	err           error
 }
 
+// custom text style
 var (
-	systemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
-	secureStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
-	lockedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+	systemStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true) // user connected/disconnected
+	secureStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)     // encrypted
+	lockedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)   // decrypted
 )
 
 const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -119,23 +120,15 @@ func handleIncomingMessage(p *tea.Program, data []byte) error {
 
 	switch envelope.Type {
 	case "MSG":
-		var event ChatMsg
+		var event ChatMsg // send message to tui
 		if err := json.Unmarshal(data, &event); err != nil {
 			return err
 		}
 		p.Send(event)
 		return nil
 
-	case "USER":
+	case "USER": // just for connect and disconnect for now
 		var event UserMsg
-		if err := json.Unmarshal(data, &event); err != nil {
-			return err
-		}
-		p.Send(event)
-		return nil
-
-	case "CHAT":
-		var event ChatMsg
 		if err := json.Unmarshal(data, &event); err != nil {
 			return err
 		}
@@ -150,6 +143,7 @@ func handleIncomingMessage(p *tea.Program, data []byte) error {
 // the state
 func InitialChatModel(c *SocketClient) ChatModel {
 
+	// create a user
 	u := User{
 		UID:       generateUserID(),
 		Status:    "connected",
@@ -189,9 +183,10 @@ func InitialChatModel(c *SocketClient) ChatModel {
 func (m ChatModel) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink, func() tea.Msg {
 		userEvent := UserMsg{
-			Type:   "USER",
-			Status: "connected",
-			UserID: m.user.UID,
+			Type:      "USER",
+			Status:    "connected",
+			UserID:    m.user.UID,
+			Timestamp: time.Now().Unix(),
 		}
 		payload, _ := json.Marshal(userEvent)
 		m.client.SendChan <- payload
@@ -224,12 +219,14 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 			return m, nil
 		case tea.KeyCtrlC, tea.KeyEsc:
+			// event for this is sent from the server side since write pump shuts down on tea.quit
 			return m, tea.Quit
 		case tea.KeyEnter:
 			input := m.textarea.Value()
 			if strings.TrimSpace(input) == "" {
 				return m, nil
 			}
+			// encrypt message before sending
 			inputBytes, _ := json.Marshal(input)
 			encryptedInput, err := encryption.EncryptData(inputBytes, encryption.MasterKey)
 			if err != nil {
@@ -245,6 +242,7 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			payload, _ := json.Marshal(event)
+			// select statement here prevents send from blocking. if the channel is full the default case exits the select, effectively killing this process silently
 			select {
 			case m.client.SendChan <- payload:
 			default:
@@ -276,11 +274,7 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd)
 }
 
-func (m ChatModel) renderMessage(msg ChatMsg) string {
-	if msg.Type == "USER" {
-		return systemStyle.Render(string(msg.Content))
-	}
-
+func (m *ChatModel) renderMessage(msg ChatMsg, width int) string {
 	var label string
 	if msg.UserID == m.user.UID {
 		label = m.senderStyle.Render("You: ")
@@ -288,10 +282,12 @@ func (m ChatModel) renderMessage(msg ChatMsg) string {
 		label = fmt.Sprintf("%s: ", msg.UserID)
 	}
 
+	contentWidth := width - lipgloss.Width(label) - 1
+
 	var text string
 	if !m.showDecrypted {
-		text = lipgloss.NewStyle().Foreground(lipgloss.Color("242")).
-			Render(fmt.Sprintf("[%x...]", msg.Content[:min(10, len(msg.Content))]))
+		//text = fmt.Sprintf("[%x...]", msg.Content[:min(10, len(msg.Content))])
+		text = fmt.Sprintf("%x", msg.Content)
 	} else {
 		decryptedBytes, err := encryption.DecryptData(msg.Content, encryption.MasterKey)
 		if err != nil {
@@ -303,7 +299,11 @@ func (m ChatModel) renderMessage(msg ChatMsg) string {
 		}
 	}
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, label, text)
+	contentStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("242")).
+		Width(contentWidth)
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, label, contentStyle.Render(text))
 }
 
 func min(a, b int) int {
@@ -322,13 +322,8 @@ func (m *ChatModel) refreshViewport() {
 	}
 
 	for _, msg := range m.messages {
-		line := m.renderMessage(msg)
-
-		wrappedLine := lipgloss.NewStyle().
-			Width(wrapWidth).
-			Render(line)
-
-		rendered = append(rendered, wrappedLine)
+		line := m.renderMessage(msg, wrapWidth)
+		rendered = append(rendered, line)
 	}
 
 	m.viewport.SetContent(strings.Join(rendered, "\n"))

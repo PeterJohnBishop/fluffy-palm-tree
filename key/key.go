@@ -6,6 +6,7 @@ import (
 	"fmt"
 )
 
+// generate a random 32 bit string for master key
 func main() {
 	b := make([]byte, 32)
 	rand.Read(b)

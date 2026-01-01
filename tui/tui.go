@@ -109,7 +109,6 @@ func handleIncomingMessage(p *tea.Program, data []byte) error {
 		return err
 	}
 
-	// Switch based on the Type and unmarshal into the final struct
 	switch envelope.Type {
 	case "MSG":
 		var event ChatMsg
@@ -129,14 +128,6 @@ func handleIncomingMessage(p *tea.Program, data []byte) error {
 
 	case "CHAT":
 		var event ChatMsg
-		if err := json.Unmarshal(data, &event); err != nil {
-			return err
-		}
-		p.Send(event)
-		return nil
-
-	case "ACK":
-		var event AckEvent
 		if err := json.Unmarshal(data, &event); err != nil {
 			return err
 		}
@@ -188,6 +179,13 @@ func InitialChatModel(c *SocketClient) ChatModel {
 }
 
 func (m ChatModel) Init() tea.Cmd {
+	userEvent := UserMsg{
+		Type:   "USER",
+		Status: "connected",
+		UserID: m.user.UID,
+	}
+	payload, _ := json.Marshal(userEvent)
+	m.client.SendChan <- payload
 	return textarea.Blink
 }
 
@@ -202,6 +200,18 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		headerHeight := 1 // Room for a header or title
+		footerHeight := m.textarea.Height() + lipgloss.Height(gap)
+
+		m.viewport.Width = msg.Width
+		m.viewport.Height = msg.Height - headerHeight - footerHeight
+
+		// Update the content wrapping to the new width
+		m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
+
+		// Always keep the view at the bottom when resizing
+		m.viewport.GotoBottom()
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:

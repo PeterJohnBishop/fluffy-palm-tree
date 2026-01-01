@@ -1,15 +1,23 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/gorilla/websocket"
 )
 
+type SocketClient struct {
+	Conn     *websocket.Conn
+	SendChan chan []byte
+}
 type WebSocketEvent struct {
 	Type string `json:"type"`
 }
@@ -19,7 +27,7 @@ type ErrMsg struct {
 	Err  error  `json:"err"`
 }
 
-type MessageEvent struct {
+type ChatMsg struct {
 	Type      string `json:"type"`
 	Content   string `json:"content"`
 	UserID    string `json:"user_id"`
@@ -32,7 +40,7 @@ type User struct {
 	Timestamp int64
 }
 
-type UserEvent struct {
+type UserMsg struct {
 	Type      string `json:"type"`
 	Status    string `json:"status"`
 	UserID    string `json:"user_id"`
@@ -47,6 +55,8 @@ type AckEvent struct {
 const gap = "\n\n"
 
 type ChatModel struct {
+	client      *SocketClient
+	user        User
 	viewport    viewport.Model
 	messages    []string
 	textarea    textarea.Model
@@ -54,8 +64,99 @@ type ChatModel struct {
 	err         error
 }
 
+const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+func generateUserID() string {
+	b := make([]byte, 8)
+	for i := range b {
+		b[i] = charset[rand.IntN(len(charset))]
+	}
+	return string(b)
+}
+
+func (c *SocketClient) WritePump() {
+	defer c.Conn.Close()
+	for {
+		message, ok := <-c.SendChan
+		if !ok {
+			return
+		}
+		err := c.Conn.WriteMessage(websocket.TextMessage, message)
+		if err != nil {
+			return
+		}
+	}
+}
+
+func ListenForMessages(c *SocketClient, p *tea.Program) {
+	for {
+		_, message, err := c.Conn.ReadMessage()
+		if err != nil {
+			p.Send(ErrMsg{Type: "error", Err: err})
+			return
+		}
+		err = handleIncomingMessage(p, message)
+		if err != nil {
+			p.Send(ErrMsg{Type: "error", Err: err})
+			continue
+		}
+	}
+}
+
+func handleIncomingMessage(p *tea.Program, data []byte) error {
+	var envelope WebSocketEvent
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return err
+	}
+
+	// Switch based on the Type and unmarshal into the final struct
+	switch envelope.Type {
+	case "MSG":
+		var event ChatMsg
+		if err := json.Unmarshal(data, &event); err != nil {
+			return err
+		}
+		p.Send(event)
+		return nil
+
+	case "USER":
+		var event UserMsg
+		if err := json.Unmarshal(data, &event); err != nil {
+			return err
+		}
+		p.Send(event)
+		return nil
+
+	case "CHAT":
+		var event ChatMsg
+		if err := json.Unmarshal(data, &event); err != nil {
+			return err
+		}
+		p.Send(event)
+		return nil
+
+	case "ACK":
+		var event AckEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return err
+		}
+		p.Send(event)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown event type: %s", envelope.Type)
+	}
+}
+
 // the state
-func InitialChatModel() ChatModel {
+func InitialChatModel(c *SocketClient) ChatModel {
+
+	u := User{
+		UID:       generateUserID(),
+		Status:    "connected",
+		Timestamp: time.Now().Unix(),
+	}
+
 	ta := textarea.New()
 	ta.Placeholder = "Send a message..."
 	ta.Focus()
@@ -71,12 +172,13 @@ func InitialChatModel() ChatModel {
 	ta.ShowLineNumbers = false
 
 	vp := viewport.New(30, 5)
-	vp.SetContent(`Welcome to the chat room!
-Type a message and press Enter to send.`)
+	vp.SetContent(fmt.Sprintf("Welcome! Your ID is: %s\nType a message and press Enter.", u.UID))
 
 	ta.KeyMap.InsertNewline.SetEnabled(false)
 
 	return ChatModel{
+		client:      c,
+		user:        u,
 		textarea:    ta,
 		messages:    []string{},
 		viewport:    vp,
@@ -100,36 +202,53 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.viewport.Width = msg.Width
-		m.textarea.SetWidth(msg.Width)
-		m.viewport.Height = msg.Height - m.textarea.Height() - lipgloss.Height(gap)
-
-		if len(m.messages) > 0 {
-			m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
-		}
-		m.viewport.GotoBottom()
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
-			fmt.Println(m.textarea.Value())
 			return m, tea.Quit
 		case tea.KeyEnter:
-			m.messages = append(m.messages, m.senderStyle.Render("You: ")+m.textarea.Value())
-			m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
+			input := m.textarea.Value()
+			if strings.TrimSpace(input) == "" {
+				return m, nil
+			}
+
+			event := ChatMsg{
+				Type:      "MSG",
+				Content:   input,
+				UserID:    m.user.UID,
+				Timestamp: time.Now().Unix(),
+			}
+
+			payload, _ := json.Marshal(event)
+			select {
+			case m.client.SendChan <- payload:
+			default:
+			}
+
 			m.textarea.Reset()
-			m.viewport.GotoBottom()
 		}
+
+	case ChatMsg:
+		var label string
+		if msg.UserID == m.user.UID {
+			label = m.senderStyle.Render("You: ")
+		} else {
+			label = fmt.Sprintf("%s: ", msg.UserID)
+		}
+
+		m.messages = append(m.messages, label+msg.Content)
+		m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
+		m.viewport.GotoBottom()
+
+	case UserMsg:
+		systemStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true)
+		m.messages = append(m.messages, systemStyle.Render(fmt.Sprintf("** User %s %s **", msg.UserID, msg.Status)))
+		m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
+		m.viewport.GotoBottom()
 
 	case ErrMsg:
 		m.err = msg.Err
 		return m, nil
-
-	case UserEvent:
-		userMsg := fmt.Sprintf("User %s has %s to the chat.", msg.UserID, msg.Status)
-		m.messages = append(m.messages, m.senderStyle.Render(userMsg))
-		m.viewport.SetContent(lipgloss.NewStyle().Width(m.viewport.Width).Render(strings.Join(m.messages, "\n")))
-		m.viewport.GotoBottom()
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)

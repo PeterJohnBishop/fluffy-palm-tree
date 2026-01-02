@@ -5,15 +5,18 @@ go 1.25.5
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/gorilla/websocket v1.5.3
+	github.com/schollz/pake/v3 v3.1.0
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-udiff v0.3.1 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.14 // indirect
 	github.com/clipperhouse/displaywidth v0.6.1 // indirect
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect
+	github.com/tscholl2/siec v0.0.0-20240310163802-c2c6f6198406 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 )
 
@@ -35,6 +38,7 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	golang.org/x/crypto v0.46.0
 	golang.org/x/image v0.34.0
 	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.32.0 // indirect

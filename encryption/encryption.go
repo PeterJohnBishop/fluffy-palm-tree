@@ -5,7 +5,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"encoding/base32"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -24,35 +23,24 @@ import (
 )
 
 // to generate a random 32-byte master key, use: 'go run generate.go' in the key folder
-
-var MasterKey []byte
+var SaltMaster []byte
 
 func InitEnv() {
-	keyHex := os.Getenv("MASTER_KEY")
-	if keyHex == "" {
-		log.Fatal("MASTER_KEY environment variable is not set")
+	saltHex := os.Getenv("SALT")
+	if saltHex == "" {
+		log.Fatal("SALT environment variable is not set")
 	}
 
-	decoded, err := hex.DecodeString(keyHex)
+	decoded, err := hex.DecodeString(saltHex)
 	if err != nil {
-		log.Fatalf("MASTER_KEY must be a valid hex string: %v", err)
+		log.Fatalf("SALT must be a valid hex string: %v", err)
 	}
 
 	if len(decoded) != 32 {
-		log.Fatalf("MASTER_KEY must be 32 bytes; got %d", len(decoded))
+		log.Fatalf("SALT must be 32 bytes; got %d", len(decoded))
 	}
 
-	MasterKey = decoded
-}
-
-// creates a 160-bit (20 byte) Base32 secret
-// *for totp
-func GenerateRandomSecret() (string, error) {
-	secret := make([]byte, 20)
-	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
-		return "", err
-	}
-	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secret), nil
+	SaltMaster = decoded
 }
 
 // encrypt with AES-GCM, handles raw bytes (images, files, etc)

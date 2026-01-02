@@ -6,40 +6,39 @@ import (
 	"log"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 )
 
 func main() {
+	// 1. Load environment variables for local development
 	if err := godotenv.Load(); err != nil {
 		log.Print("No .env file found")
 	}
+
+	// Initialize encryption (SaltMaster, etc.)
 	encryption.InitEnv()
 
-	conn, _, err := websocket.DefaultDialer.Dial("ws://localhost:8080/ws", nil)
-	if err != nil {
-		log.Fatal(err)
+	// 2. Initialize an empty SocketClient.
+	// We don't Dial here anymore. The Dial happens inside the TUI's runHandshake
+	// once the user enters the Room ID and Password.
+	c := &tui.SocketClient{
+		SendChan: make(chan []byte, 256),
 	}
-	defer conn.Close()
 
-	c := NewSocketClient(conn)
+	// 3. Initialize the TUI Model.
+	// We pass nil for the program initially because 'p' doesn't exist yet.
+	m := tui.InitialChatModel(c, nil)
 
-	go c.WritePump()
+	// 4. Create the Bubble Tea program.
+	// We use the AltScreen (fullscreen) for a better chat experience.
+	p := tea.NewProgram(&m, tea.WithAltScreen())
 
-	p := tea.NewProgram(tui.InitialChatModel(c))
+	// 5. Inject the program pointer back into the model.
+	// This allows the model to send messages back to itself from goroutines.
+	m.SetProgram(p)
 
-	go tui.ListenForMessages(c, p)
-
+	// 6. Start the TUI.
 	if _, err := p.Run(); err != nil {
-		log.Fatal(err)
+		log.Fatalf("TUI Error: %v", err)
 	}
-
-}
-
-func NewSocketClient(conn *websocket.Conn) *tui.SocketClient {
-	return &tui.SocketClient{
-		Conn:     conn,
-		SendChan: make(chan []byte),
-	}
-
 }

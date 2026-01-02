@@ -46,7 +46,7 @@ func (m *ChatModel) runHandshake(password string, roomID string) tea.Cmd {
 		headers := http.Header{}
 		headers.Add("X-Room-Password", password)
 
-		u := url.URL{Scheme: "ws", Host: "localhost:8080", Path: "/ws/" + roomID}
+		u := url.URL{Scheme: "ws", Host: "suber-duper-guide-wss-932a960b6d56.herokuapp.com", Path: "/ws/" + roomID}
 		conn, _, err := websocket.DefaultDialer.Dial(u.String(), headers)
 		if err != nil {
 			return ErrMsg{Err: err}
